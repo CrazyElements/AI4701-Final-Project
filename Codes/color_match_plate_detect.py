@@ -11,8 +11,8 @@ lower_yellow = np.array([10, 160, 150])  # 真： 43, 75%, 83%
 upper_yellow = np.array([35, 255, 255])
 lower_green = np.array([50, 40, 150])  # 真：131, 37%, 76%
 upper_green = np.array([80, 100, 255])  # 假
-lower_white = np.array([20, 0, 220])  # 真：45, 2%, 70%
-upper_white = np.array([35, 30, 245])  # 假: 60, 4%, 95%, 也是真
+lower_white = np.array([20, 0, 150])  # 真：45, 2%, 70%
+upper_white = np.array([40, 30, 245])  # 假: 60, 4%, 95%, 也是真
 
 
 # detect the place in the image
@@ -35,6 +35,12 @@ class ColorMatchPlateDetect(object):
     # 颜色定位，在色彩空间中处理，使用H分量的蓝色和黄色匹配
     def RGB2HSV(self, img):
         """Convert the image from RGB to HSV
+
+        Args:
+            img (ndarray): the image to be converted
+
+        Returns:
+            ndarray: hsv image after gaussian blur
         """
         # 1. convert the image to HSV
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -48,8 +54,15 @@ class ColorMatchPlateDetect(object):
         hsv_blur = cv2.GaussianBlur(hsv, (5, 5), 0)
         return hsv_blur
 
-    # 找到符合条件的矩形块，作为候选车牌
     def getCandidatePlates(self, img):
+        """Get the candidate plates
+
+        Args:
+            img (ndarray): the image to be processed
+
+        Returns:
+            ndarray: the candidate plates
+        """
         # find contours
         contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
@@ -70,6 +83,8 @@ class ColorMatchPlateDetect(object):
         print("get plate color:", color)
         hsv_mask = self.getHsvUnderMask(self.img, color)
         hsv_mask_gray = cv2.cvtColor(hsv_mask, cv2.COLOR_BGR2GRAY)
+        # self.showImg(hsv_mask_gray, "hsv_mask_gray")
+        self.saveImg(hsv_mask_gray, self.out_fpre + "hsv_mask_gray.jpg")
         # 开闭运算
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
         closed = cv2.morphologyEx(hsv_mask_gray,
@@ -81,11 +96,15 @@ class ColorMatchPlateDetect(object):
         self.saveImg(opened, self.out_fpre + "opened.jpg")
         validMinRects = self.getCandidatePlates(opened)
         self.drawMinRects(validMinRects)
-        rotated_plate = self.cutMinRects(validMinRects)
+        rotated_plate = self.cutMinRectsAndRotate(validMinRects)
         self.perspectiveTrans(rotated_plate, validMinRects)
 
-    # 利用三种模板的概率(mask的占比)确定车牌的颜色
     def colorMatch(self):
+        """Match the color of the plate according to the probability of the three masks
+
+        Returns:
+            Color: the color of the plate
+        """
         probs = []
         for color in Color:
             p = self.colorJudge(color)
@@ -96,6 +115,15 @@ class ColorMatchPlateDetect(object):
         return self.colorType
 
     def getHsvUnderMask(self, img, color):
+        """Get the hsv image under the specific color mask
+
+        Args:
+            img (ndarray): the image to be processed
+            color (Color): the color of the plate
+
+        Returns:
+            ndarray: hsv image under the specific color mask
+        """
         hsv = self.RGB2HSV(img)
         if color == Color.BLUE:
             self.hsvLB = lower_blue
@@ -119,8 +147,15 @@ class ColorMatchPlateDetect(object):
         hsv_mask = cv2.bitwise_and(hsv, hsv, mask=mask)
         return hsv_mask
 
-    # 给定一个模板，判断车牌含某种颜色的概率
     def colorJudge(self, color):
+        """Judge the probability of the plate containing the specific color
+
+        Args:
+            color (Color): the possible color of the plate
+
+        Returns:
+            float: the probability of the plate containing the specific color
+        """
         hsv_mask = self.getHsvUnderMask(self.img, color)
         _, _, v = cv2.split(hsv_mask)  # 返回灰度信息
         p = np.count_nonzero(v) / (v.shape[0] * v.shape[1])
@@ -128,6 +163,14 @@ class ColorMatchPlateDetect(object):
 
     # 对外接矩形进行判断，排除不可能是车牌的矩形
     def isProperSize(self, minRect):
+        """Judge whether the region is a proper plate
+
+        Args:
+            minRect (ndarray): the minAreaRect of the region
+
+        Returns:
+            bool: whether the region is a proper plate
+        """
         _, hw, _ = minRect
 
         min_area = self.areaDpi * self.areaMin  # 面积最小值
@@ -153,16 +196,34 @@ class ColorMatchPlateDetect(object):
 
     # 绘制出可能的车牌
     def drawMinRects(self, validMinRects):
+        """Draw the possible plates
+
+        Args:
+            validMinRects (ndarray): the minAreaRects of the possible plates
+        """
         img_ = self.img.copy()
         for minRect in validMinRects:
+            scale = 1.05
+            minRect = (minRect[0], (minRect[1][0] * scale,
+                                    minRect[1][1] * scale), minRect[2])
             box = cv2.boxPoints(minRect)  # 获取旋转矩形的四个顶点坐标
             box = np.int0(box)
             cv2.drawContours(img_, [box], 0, (0, 0, 255), 5)  # 绘制轮廓图像
         self.saveImg(img_, self.out_fpre + "minRects.jpg")
 
-    # 从原图中切割可能的车牌，并保存
-    def cutMinRects(self, validMinRects):
+    def cutMinRectsAndRotate(self, validMinRects):
+        """Cut the possible plates from the original image and rotate them
+
+        Args:
+            validMinRects (ndarray): the minAreaRects of the possible plates
+
+        Returns:
+            ndarray: rotated images of the possible plates
+        """
         for minRect in validMinRects:  # 这里只考虑了一个车牌的情况，如果有多个车牌，还需要用SVM进行判断
+            scale = 1.05  # 扩大化旋转
+            minRect = (minRect[0], (minRect[1][0] * scale,
+                                    minRect[1][1] * scale), minRect[2])
             box = cv2.boxPoints(minRect)  # 获取旋转矩形的四个顶点坐标
             box = np.int0(box)
             # 将四个顶点的坐标转换为齐次坐标
@@ -170,6 +231,17 @@ class ColorMatchPlateDetect(object):
                 [box, np.ones([4, 1], dtype=np.float32)], axis=1)
             center, _, angle = minRect
             print("angle=", angle)
+            y1, y2, x1, x2 = min(box[:,
+                                     1]), max(box[:,
+                                                  1]), min(box[:,
+                                                               0]), max(box[:,
+                                                                            0])
+            if y1 < 0:
+                y1 = 0
+            if x1 < 0:
+                x1 = 0
+            plate_roi = self.img[y1:y2, x1:x2]
+            self.saveImg(plate_roi, self.out_fpre + "plate_roi.jpg")
             # print(src_pts)
             # 将倾斜的车牌(最小外接矩形)旋转回来
             rotation_Mat = cv2.getRotationMatrix2D(
@@ -191,26 +263,35 @@ class ColorMatchPlateDetect(object):
         return rotated_plate
 
     def calSlope(self, rotated_plate):
-        rp_mask = self.getHsvUnderMask(rotated_plate, self.colorType)
+        """Calculate the slope of the bevel edge of rotated plate
+
+        Args:
+            rotated_plate (ndarray): rotated image of the plate
+
+        Returns:
+            float: the slope of the bevel edge
+        """
+        rp_blur = cv2.GaussianBlur(rotated_plate, (15, 15), 0)
+        rp_mask = self.getHsvUnderMask(rp_blur, self.colorType)
         rp_gray = cv2.cvtColor(rp_mask, cv2.COLOR_BGR2GRAY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
         closed = cv2.morphologyEx(rp_gray,
                                   cv2.MORPH_CLOSE,
                                   kernel,
-                                  iterations=2)
-        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
+                                  iterations=1)
+        opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=2)
         h, w = opened.shape[:2]
         print(h, w)
-        w_thresh = w // 20
+        w_thresh = w // 10
         pts = []
-        for y in range(h // 3, h - h // 3, h // 40):
-            for x in range(w_thresh):
-                if rp_gray[y, x] != 0:
+        for y in range(1 * h // 3, 2 * h // 3, h // 30):
+            for x in range(20, w_thresh):
+                if rp_gray[y, x] > 100:
                     pts.append([y, x])
                     cv2.circle(closed, (x, y), 5, (255, 255, 255), -1)
                     break
         pts = np.array(pts)
-        self.showImg(closed, "closed", (640, 200))
+        # self.showImg(closed, "closed", (640, 200))
         # 拟合直线
         vx, vy, _, _ = cv2.fitLine(points=pts,
                                    distType=cv2.DIST_L2,
@@ -220,8 +301,16 @@ class ColorMatchPlateDetect(object):
         slope = vy / vx
         return slope
 
-    # 给定截取的车牌图像，得到透视投影变换对应的源点和目标点
     def getSrcAndDstPts(self, rotated_plate):
+        """Get the source points and destination points for perspective transform
+
+        Args:
+            rotated_plate (ndarray): rotated image of the plate
+
+        Returns:
+            ndarray: source points
+            ndarray: destination points
+        """
         h, w = rotated_plate.shape[:2]
         slope = self.calSlope(rotated_plate)[0]
         print("slope=:", slope)
@@ -239,10 +328,11 @@ class ColorMatchPlateDetect(object):
         return src_pts, dst_pts
 
     def perspectiveTrans(self, rotated_plate, validMinRects):
-        """透视变换
+        """Perspective transform
 
         Args:
-            src_pts (ndarray): src_pts
+            rotated_plate (ndarray): rotated image of the plate
+            validMinRects (list): valid min rectangles
         """
         for minRect in validMinRects:
             src_pts, dst_pts = self.getSrcAndDstPts(rotated_plate)
@@ -268,21 +358,29 @@ class ColorMatchPlateDetect(object):
 
 
 def getPlate4Onelevel(level, number):
+    """Get the plate for one level
+
+    Args:
+        level (string): the difficulty
+        number (string): the number of the plate
+    """
     in_filename = "images/" + level + "/" + number + ".jpg"
     img = cv2.imread(in_filename)
-    out_dir = "images_res_tradition/" + level + "/plate_detect"
+    out_dir = "images_res/" + level + "/plate_detect1"
     out_fpre = number + "_"
     os.makedirs(out_dir, exist_ok=True)
     cv2.resize(img, (800, 600), interpolation=cv2.INTER_CUBIC)
     pd = ColorMatchPlateDetect(img, out_dir, out_fpre)
     if level == "easy":
-        filename = out_fpre + "plate.jpg"
+        filename = out_fpre + "warp.jpg"
         pd.saveImg(pd.img, filename, size=(640, 200))
     else:
         pd.plateLocate()
 
 
 def getPlate4AllLevels():
+    """Get the plate for all levels
+    """
     levels = ["easy", "medium", "difficult"]
     numbers = [1, 2, 3]
     for level in levels:
@@ -291,6 +389,8 @@ def getPlate4AllLevels():
 
 
 def getPlate4SpecificLevel():
+    """Get the plate for specific level
+    """
     level = ["easy", "medium", "difficult"][int(
         input(
             "please select the level of difficulty(1: easy, 2: medium, 3: difficult):"
